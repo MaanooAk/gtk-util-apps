@@ -1,6 +1,14 @@
 # gtk-util-apps
 
-Collection of small gtk-utils-apps that are not worth their own repo
+Collection of small gtk utils apps that are not worth their own repo
+
+- [Question](./Question/)
+- [SystemBars](./SystemBars/)
+- [last-email](./last-email/)
+- [Black](./Black/)
+
+
+### Screenshots
 
 - [Question](./Question/)
 
