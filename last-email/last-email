@@ -11,6 +11,7 @@ from subprocess import run, Popen, PIPE, DEVNULL
 
 import email
 from email.utils import parsedate_to_datetime
+from email.header import make_header, decode_header
 import imaplib2
 
 CONFIG = "~/.config/last-email/"
@@ -45,12 +46,15 @@ set_title("")
 
 def get_body(msg):
     if msg.is_multipart():
+        parts = []
         for part in msg.walk():
             ctype = part.get_content_type()
-            if ctype == "text/plain":
-                return part.get_payload(decode=True).decode()
+            if ctype == "text/plain" or ctype == "text/html":
+                charset = part.get_content_charset() or "utf-8"
+                parts.append(part.get_payload(decode=True).decode(charset))
+        return "\n\n".join(parts)
     else:
-        return msg.get_payload(decode=True).decode()
+        return msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8")
     return ""
 
 
@@ -83,15 +87,18 @@ def print_msg(id):
     # if date < limit:
     #     return
 
+    msg_subject = str(make_header(decode_header(msg["subject"])))
+    msg_from = msg["from"]
+
     if not GRAPHICAL:
-        set_title(msg["subject"])
-        print("\n\n\033[0m:: " + msg["from"] +
-              "\033[0m\n:: \033[1m" + msg["subject"] + "\033[0m\n")
+        set_title(msg_subject)
+        print("\n\n\033[0m:: " + msg_from +
+              "\033[0m\n:: \033[1m" + msg_subject + "\033[0m\n")
         run(["sh", "-c", f"pandoc -f html -t plain"], input=get_body(msg).encode())
         print()
 
     else:
-        create_window(msg["subject"] + " (" + msg["from"] + ")", get_body(msg))
+        create_window(msg_subject + " (" + msg_from + ")", get_body(msg))
 
 
 status, data = mail.search(None, "UNSEEN")
