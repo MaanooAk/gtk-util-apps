@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
+# fmt: off
 import gi
 gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gtk, Gdk
+# fmt: on
 
 
 class BlackFullscreenApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.maanoo.Black")
+        self.css_provider = Gtk.CssProvider()
+        self.colors = ["black", "white"]
+        self.color = 0
         self.run()
 
     def do_activate(self):
@@ -18,22 +23,35 @@ class BlackFullscreenApp(Gtk.Application):
         window.set_cursor(Gdk.Cursor.new_from_name("none"))
         window.fullscreen()
 
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_data(b"window { background-color: black; }")
+        self.update_color()
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
-            css_provider,
+            self.css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
         gesture = Gtk.GestureClick()
+        gesture.set_button(0)
         gesture.connect("pressed", self.on_click)
         window.add_controller(gesture)
 
         window.present()
 
+    def update_color(self, change=0):
+        self.color = (self.color + change) % len(self.colors)
+        css = f"""
+        window {{
+            background-color: {self.colors[self.color]};
+            transition: background-color .3s ease-in-out;
+        }}"""
+        self.css_provider.load_from_data(css.encode())
+
     def on_click(self, gesture, n_press, x, y):
-        self.quit()
+        button = gesture.get_current_button()
+        if button == 3:
+            self.update_color(1)
+        else:
+            self.quit()
 
 
 if __name__ == "__main__":
