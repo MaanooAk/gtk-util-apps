@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+# gi.require_version("WebKit2", "4.1")
+gi.require_version("WebKit", "6.0")
+
+from gi.repository import Gtk, GLib, WebKit, Gio, Gdk, Adw
+WebKit2 = WebKit
+
+import sys
+import mistune
+import re
+import io
+import subprocess
+
+
+APP_NAMESPACE = "com.maanoo.question"
+OLLAMA_MODEL = "gemma3"
+
+PREFIX = "Short answers, no explanations, no comments. "
+PREFIX_CODE = PREFIX + "Generate only an uncommmented python script, only prints, that gives the answer to the question: "
+
+CSS = """
+body {
+    font-family: Cantarell, sans-serif;
+    padding: 24px;
+    background-color: #fafafb;
+    color: #2e3436;
+}
+
+h1, h2, h3 {
+    font-weight: bold;
+}
+
+pre {
+    background-color: #f6f5f4;
+    padding: 12px;
+    border-radius: 12px;
+    overflow-x: auto;
+
+    page-break-inside: avoid;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+"""
+
+HTML_TEMPLATE = """
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>{css}</style>
+</head>
+<body>
+    {content}
+</body>
+</html>
+"""
+
+markdown = mistune.create_markdown()
+
+class MainWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_default_size(800, 500)
+        self.set_title("Question")
+
+        self.set_content(self.build_ui())
+
+        self.current_markdown = ""
+        self.process = None
+
+    def build_ui(self):
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        header = Adw.HeaderBar()
+
+        new_button = Gtk.Button.new_from_icon_name("document-new-symbolic")
+        new_button.connect("clicked", self.on_new_window)
+        header.pack_start(new_button)
+
+        menu_button = Gtk.MenuButton()
+        menu_button.set_icon_name("open-menu-symbolic")
+        menu_model = Gio.Menu()
+        section = Gio.Menu()
+        section.append("New Window", "app.new_window")
+        section.append("Duplicate Window", "app.duplicate_window")
+        menu_model.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Kill Server", "app.kill_server")
+        menu_model.append_section(None, section)
+        menu_button.set_menu_model(menu_model)
+        header.pack_end(menu_button)
+
+        prompt_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        prompt_box.set_margin_top(12)
+        prompt_box.set_margin_start(12)
+        prompt_box.set_margin_end(12)
+
+        self.entry = Gtk.Entry()
+        self.entry.set_hexpand(True)
+        self.entry.set_placeholder_text("")
+        self.entry.connect("activate", self.on_submit)
+
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_entry_key_pressed)
+        self.entry.add_controller(key_controller)
+
+        # send_button = Gtk.Button.new_with_label("Run")
+        # send_button.connect("clicked", self.on_submit)
+
+        prompt_box.append(self.entry)
+        # prompt_box.append(send_button)
+
+        self.webview = WebKit2.WebView()
+        self.webview.load_html(HTML_TEMPLATE.format(css=CSS, content=""), "file://")
+        self.webview.set_hexpand(True)
+        self.webview.set_vexpand(True)  
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_child(self.webview)
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(True)
+
+        main_box.append(prompt_box)
+        main_box.append(scroller)
+
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(header)
+        toolbar_view.set_content(main_box)
+
+        self.set_content(toolbar_view)
+        return toolbar_view
+
+    def on_entry_key_pressed(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_Escape:
+            self.entry.set_text("")
+            return True
+        return False
+
+    def on_new_window(self, button):
+        self.get_application().create_window()
+
+    def on_submit(self, widget):
+        user_input = self.entry.get_text()
+        if not user_input.strip():
+            return
+
+        if user_input.startswith("!") or user_input.endswith("!"):
+            full_prompt = PREFIX_CODE + user_input.strip("!").strip()
+            self.run_command(full_prompt, True)
+        else:
+            full_prompt = PREFIX + user_input
+            self.run_command(full_prompt)
+
+    def run_command(self, prompt, execute = False):
+        
+        if self.process:
+            self.process.force_exit()
+            self.process = None
+
+        self.current_markdown = ""
+        self.update_markdown()
+
+        self.execute = execute
+        self.process = Gio.Subprocess.new(
+            ["ollama", "run", OLLAMA_MODEL, prompt,],
+            Gio.SubprocessFlags.STDOUT_PIPE
+        )
+
+        self.stdout_stream = self.process.get_stdout_pipe()
+
+        self.read_stream()
+
+    def read_stream(self):
+        if not self.stdout_stream:
+            return
+
+        self.stdout_stream.read_bytes_async(
+            4096 / 64,
+            GLib.PRIORITY_DEFAULT,
+            None,
+            self.on_stream_read
+        )
+
+    def on_stream_read(self, stream, result):
+        try:
+            chunk = stream.read_bytes_finish(result)
+        except GLib.Error:
+            return
+
+        if chunk.get_size() == 0:
+            if (self.execute):
+                match = re.search(r'```.*\n((.|\n)*?)```', self.current_markdown, re.MULTILINE)
+                if match:
+                    code = match.group(1).strip()
+                    self.run_script(code)
+            return
+
+        text = chunk.get_data().decode("utf-8", errors="ignore")
+        self.current_markdown += text
+
+        self.update_markdown()
+
+        # Continue reading
+        self.read_stream()
+
+    def update_markdown(self):
+        html_body = markdown(self.current_markdown)
+
+        self.webview.evaluate_javascript(
+            f"document.body.innerHTML = `{html_body}`;",
+            -1, None, None, None
+        )
+
+    def run_script(self, code_string):
+        namespace = {"__name__": "__main__"}
+        output_buffer = io.StringIO()
+        original_stdout = sys.stdout
+        try:
+            try:
+                sys.stdout = output_buffer
+                exec(code_string, namespace)
+            finally:
+                sys.stdout = original_stdout
+
+            captured_output = output_buffer.getvalue()
+            markdown_output = "\n\n".join(captured_output.splitlines())
+            self.current_markdown += f"{markdown_output}"
+
+        except Exception as e:
+            self.current_markdown += f"Error: {e}"
+        self.update_markdown()
+
+
+class QuestionApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_NAMESPACE)
+        self.connect("activate", self.on_activate)
+
+    def on_activate(self, app):
+
+        action = Gio.SimpleAction.new("new_window", None)
+        action.connect("activate", lambda a,b: self.create_window())
+        self.add_action(action)
+        action = Gio.SimpleAction.new("duplicate_window", None)
+        action.connect("activate", lambda a,b: self.duplicate_window())
+        self.add_action(action)
+        action = Gio.SimpleAction.new("kill_server", None)
+        action.connect("activate", lambda a,b: kill_server())
+        self.add_action(action)
+
+        self.set_accels_for_action("app.new_window", ["<Primary>n"])
+        self.set_accels_for_action("app.duplicate_window", ["<Primary>d"])
+        self.set_accels_for_action("app.kill_server", ["<Primary>q"])
+
+        self.create_window()
+
+    def create_window(self):
+        win=MainWindow(self)
+        win.present()
+
+    def duplicate_window(self):
+        current_prompt = self.get_active_window().entry.get_text()
+        win=MainWindow(self)
+        win.present()
+        win.entry.set_text(current_prompt)
+
+def run_process(command):        
+    dnull = subprocess.DEVNULL
+    subprocess.Popen(command,
+        stdout=dnull, stderr=dnull, stdin=dnull,
+        start_new_session=True)
+
+def start_server():
+    run_process(["ollama", "start"])
+    run_process(["ollama", "run", OLLAMA_MODEL, ""])
+
+def kill_server():
+    run_process(["pkill", "ollama"])
+
+
+def main():
+    start_server()
+    app = QuestionApp()
+    app.run(sys.argv)
+
+if __name__ == "__main__":
+    main()

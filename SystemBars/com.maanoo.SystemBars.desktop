@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=System Bars
+Exec=SystemBars
+Icon=com.maanoo.SystemBars.svg
+Categories=Utility;
+Terminal=false

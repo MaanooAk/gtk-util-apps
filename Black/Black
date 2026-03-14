@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+
+import gi
+gi.require_version("Gtk", "4.0")
+
+from gi.repository import Gtk, Gdk
+
+
+class BlackFullscreenApp(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="com.maanoo.Black")
+        self.run()
+
+    def do_activate(self):
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_title("Black")
+        window.set_decorated(False)
+        window.set_cursor(Gdk.Cursor.new_from_name("none"))
+        window.fullscreen()
+
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"window { background-color: black; }")
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        gesture = Gtk.GestureClick()
+        gesture.connect("pressed", self.on_click)
+        window.add_controller(gesture)
+
+        window.present()
+
+    def on_click(self, gesture, n_press, x, y):
+        self.quit()
+
+
+if __name__ == "__main__":
+    BlackFullscreenApp()

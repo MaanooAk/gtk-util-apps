@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Black
+Exec=Black
+Icon=com.maanoo.Black.svg
+Categories=Utility;
+Terminal=false

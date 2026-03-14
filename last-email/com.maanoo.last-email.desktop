@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Last Email
+Exec=last-email -g
+Icon=com.maanoo.last-email.svg
+Categories=Utility;
+Terminal=false

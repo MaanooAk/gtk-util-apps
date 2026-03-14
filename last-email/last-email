@@ -1,0 +1,136 @@
+#!/bin/env python3
+#
+# last-email script
+#
+
+from sys import exit, argv
+from time import sleep
+from datetime import datetime, timezone, timedelta
+from os import path
+from subprocess import run, Popen, PIPE, DEVNULL
+
+import email
+from email.utils import parsedate_to_datetime
+import imaplib2
+
+CONFIG = "~/.config/last-email/"
+
+GRAPHICAL = len(argv) > 1
+
+
+def config_read_or(file, default=None):
+    p = path.expanduser(CONFIG + file)
+    if not path.exists(p):
+        if default is not None:
+            return default
+        raise FileNotFoundError(p)
+    return open(p).read().strip()
+
+
+HOST = config_read_or("host", "imap.gmail.com")
+USER = config_read_or("email")
+PASSWORD = config_read_or("pass")
+
+
+def set_title(title):
+    print("\033]0;" + title + "\007", end="")
+
+
+mail = imaplib2.IMAP4_SSL(HOST)
+mail.login(USER, PASSWORD)
+mail.select("INBOX")
+
+set_title("")
+
+
+def get_body(msg):
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype == "text/plain":
+                return part.get_payload(decode=True).decode()
+    else:
+        return msg.get_payload(decode=True).decode()
+    return ""
+
+
+windows = []
+
+
+def create_window(title, text):
+    process = Popen(["sh", "-c", f"pandoc -f html -t plain | zenity --text-info --title=\"{title}\" --width=800 --height=600 --editable --ok-label Next --cancel-label Stop"],
+                    stdin=PIPE, stdout=DEVNULL, stderr=DEVNULL)
+    process.stdin.write(text.encode())
+    process.stdin.close()
+    windows.append(process)
+
+
+def check_windows():
+    for i in windows:
+        result = i.poll()
+        if result is not None and result != 0:
+            exit(0)
+
+
+def print_msg(id):
+    status, msg_data = mail.fetch(id, "(BODY.PEEK[])")
+    msg = email.message_from_bytes(msg_data[0][1])
+
+    date = parsedate_to_datetime(msg["Date"])
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    limit = datetime.now(timezone.utc) - timedelta(minutes=30)
+    # if date < limit:
+    #     return
+
+    if not GRAPHICAL:
+        set_title(msg["subject"])
+        print("\n\n\033[0m:: " + msg["from"] +
+              "\033[0m\n:: \033[1m" + msg["subject"] + "\033[0m\n")
+        run(["sh", "-c", f"pandoc -f html -t plain"], input=get_body(msg).encode())
+        print()
+
+    else:
+        create_window(msg["subject"] + " (" + msg["from"] + ")", get_body(msg))
+
+
+status, data = mail.search(None, "UNSEEN")
+ids = data[0].split()
+if ids:
+    print_msg(ids[-1])
+
+try:
+    while True:
+        sleep(3)
+        check_windows()
+
+        status, data = mail.search(None, "UNSEEN")
+        new_ids = data[0].split()
+        for new_id in new_ids:
+            if new_id in ids:
+                continue
+            ids.append(new_id)
+            print_msg(new_id)
+
+except KeyboardInterrupt:
+    print()
+    exit(0)
+
+
+# def idle_callback(args):
+#     print(args)
+#     if args[0] == b'EXISTS':
+#
+#         status, data = mail.search(None, "UNSEEN")
+#         ids = data[0].split()
+#         if ids:
+#             last_id = ids[-1]
+#             print_msg(last_id)
+#
+#
+# while True:
+#     mail.idle(callback=idle_callback)
+#     try:
+#         time.sleep(10 * 60)
+#     except KeyboardInterrupt:
+#         exit(0)

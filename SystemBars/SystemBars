@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Gtk, Adw, GLib, Gdk
+import psutil
+
+Adw.init()
+
+
+class SystemMonitorWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_title("System Bars")
+        self.set_default_size(500, 100)
+
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar_view.add_top_bar(header)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+#        main_box.set_margin_top(24)
+#        main_box.set_margin_bottom(24)
+        main_box.set_margin_start(24)
+        main_box.set_margin_end(24)
+        toolbar_view.set_content(main_box)
+
+        self.cpu_max_bar = self.create_progress("Processor")
+        self.cpu_avg_bar = self.create_progress()
+        self.mem_bar = self.create_progress("Memory")
+        self.mem_swap_bar = self.create_progress()
+
+        main_box.append(self.cpu_max_bar["container"])
+        main_box.append(self.cpu_avg_bar["container"])
+        main_box.append(self.mem_bar["container"])
+        main_box.append(self.mem_swap_bar["container"])
+
+        toolbar_view.set_content(main_box)
+        self.set_content(toolbar_view)
+
+        GLib.timeout_add(1000 / 30, self.update_bars)
+
+    def create_progress(self, label_text=None):
+        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        if label_text:
+            label = Gtk.Label(label=label_text)
+            label.set_xalign(0)
+            container.append(label)
+
+        progress = Gtk.ProgressBar()
+#        progress.set_show_text(True)
+        container.append(progress)
+
+        return {"container": container, "progress": progress}
+
+    def update_progress(self, bar, new_fraction):
+        flow = .1
+        old_fraction = bar.get_fraction()
+        bar.set_fraction(new_fraction * flow + old_fraction * (1-flow))
+
+    def update_bars(self):
+        # CPU Usage
+        cpu_per_core = psutil.cpu_percent(percpu=True)
+        max_cpu = max(cpu_per_core)
+        avg_cpu = sum(cpu_per_core) / len(cpu_per_core)
+
+        self.update_progress(self.cpu_max_bar["progress"], max_cpu / 100)
+        self.update_progress(self.cpu_avg_bar["progress"], avg_cpu / 100)
+
+        # Memory Usage
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+
+        mem_used = mem.used
+        mem_total = mem.total
+
+        swap_used = swap.used
+        swap_total = swap.total if swap.total > 0 else 1
+
+        mem_fraction = mem_used / mem_total
+        combined_fraction = (mem_used + swap_used) / (mem_total + swap_total)
+
+        self.mem_bar["progress"].set_fraction(mem_fraction)
+        self.mem_swap_bar["progress"].set_fraction(combined_fraction)
+
+        return True
+
+
+class SystemMonitorApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="com.maanoo.SystemBars")
+
+    def do_activate(self):
+        win = SystemMonitorWindow(self)
+        win.present()
+
+
+if __name__ == "__main__":
+    app = SystemMonitorApp()
+    app.run()

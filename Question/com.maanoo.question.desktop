@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Question
+Exec=Question
+Icon=com.maanoo.question.svg
+Categories=Utility;
+Terminal=false
