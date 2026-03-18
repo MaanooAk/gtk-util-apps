@@ -39,7 +39,6 @@ def set_title(title):
 
 mail = imaplib2.IMAP4_SSL(HOST)
 mail.login(USER, PASSWORD)
-mail.select("INBOX")
 
 set_title("")
 
@@ -101,6 +100,7 @@ def print_msg(id):
         create_window(msg_subject + " (" + msg_from + ")", get_body(msg))
 
 
+mail.select("INBOX")
 status, data = mail.search(None, "UNSEEN")
 ids = data[0].split()
 if ids:
@@ -111,6 +111,7 @@ try:
         sleep(3)
         check_windows()
 
+        mail.select("INBOX")
         status, data = mail.search(None, "UNSEEN")
         new_ids = data[0].split()
         for new_id in new_ids:
