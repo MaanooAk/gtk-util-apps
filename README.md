@@ -5,6 +5,7 @@ Collection of small gtk utils apps that are not worth their own repo
 - [Question](./Question/)
 - [SystemBars](./SystemBars/)
 - [last-email](./last-email/)
+- [VideoBrowser](./VideoBrowser/)
 - [Black](./Black/)
 
 
@@ -21,6 +22,10 @@ Collection of small gtk utils apps that are not worth their own repo
 - [last-email](./last-email/)
 
 ![](.screens/last-email.png)
+
+- [VideoBrowser](./VideoBrowser/)
+
+![](.screens/VideoBrowser.png)
 
 - [Black](./Black/)
 

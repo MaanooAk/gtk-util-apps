@@ -1,0 +1,508 @@
+#!/bin/env python3
+
+import sys
+import os
+import time
+import threading
+import gi
+import csv
+import urllib.request
+import hashlib
+import fcntl
+from datetime import datetime, date
+from subprocess import run, Popen, PIPE
+
+# fmt: off
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+
+from gi.repository import Gtk, Adw, Gio, GLib, Gdk, GObject
+# fmt: on
+
+HORIZONTAL = Gtk.Orientation.HORIZONTAL
+VERTICAL = Gtk.Orientation.VERTICAL
+
+FIELD_DESC = ",%(webpage_url)s,%(upload_date)s,%(duration)s,\"%(title)s\""
+LIMIT_STEP = 20
+
+CONFIG = os.path.expanduser("~/.config/VideoBrowser/")
+CACHE = os.path.expanduser("~/.cache/VideoBrowser/")
+
+os.makedirs(CONFIG, exist_ok=True)
+os.makedirs(CACHE, exist_ok=True)
+
+CHANNELS_FILE = (CONFIG + "channels.conf")
+VIDEOS_FILE = (CONFIG + "videos_list.csv")
+ARCHIVE_FILE = (CONFIG + "videos_archive.txt")
+CACHE_DIR = (CACHE + "thumbnails")
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def config_read_or(p, default=None):
+    if not os.path.exists(p):
+        if default is not None:
+            return default
+        raise FileNotFoundError(p)
+    return open(p).read().strip()
+
+
+channels = []
+win = None
+synced_channels = False
+synced_info = False
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def replace_line(file_path, pattern, new_line):
+    with open(file_path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        with open(file_path, 'w') as f:
+            for line in lines:
+                if pattern in line:
+                    f.write(new_line + '\n')
+                else:
+                    f.write(line)
+
+
+def append_line(file_path, new_line):
+    with open(file_path + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        with open(file_path, 'a') as f:
+            f.write(new_line + '\n')
+
+
+def load_channels():
+    global channels
+    channels.clear()
+    for line in config_read_or(CHANNELS_FILE, "").split("\n"):
+        line = line.strip()
+        if len(line) == 0 or line[0] == "#":
+            continue
+        channels.append(line)
+
+
+load_channels()
+
+
+def sync_lists():
+    global synced_channels, synced_info
+    synced_channels = False
+    synced_info = False
+
+    for channel in channels:
+        result = Popen([
+            "yt-dlp", "--flat-playlist", "--skip-download", "--force-write-archive",
+            "--download-archive", ARCHIVE_FILE, "--break-on-existing",
+            "--print", channel + FIELD_DESC,
+            "--replace-in-metadata", "title", "[\"]", "'",
+            "https://www.youtube.com/" + channel
+        ], stdout=PIPE, text=True)
+
+        print("channel", channel)
+        added = False
+        for line in result.stdout:
+            append_line(VIDEOS_FILE, line.strip())
+            added = True
+
+        if added:
+            GLib.idle_add(win.reload_data)
+
+    synced_channels = True
+    GLib.idle_add(win.reload_data)
+
+
+def download_info(channel, video_url):
+    result = run([
+        "yt-dlp", "--skip-download",
+        "--print", channel + FIELD_DESC,
+        "--replace-in-metadata", "title", "[\"]", "'",
+        video_url
+    ], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        line = result.stdout.strip()
+        replace_line(VIDEOS_FILE, video_url, line)
+        GLib.idle_add(win.reload_data)
+
+
+def get_video_id(video_url):
+    for prefix in [
+        "https://www.youtube.com/watch?v=",
+        "https://www.youtube.com/shorts/",
+    ]:
+        if video_url.startswith(prefix):
+            return video_url[len(prefix):]
+
+
+def get_thumbnail_url(video_url, video_id):
+    if video_url.startswith("https://www.youtube.com"):
+        return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+    return "NA"
+
+
+def fetch_videos():
+    global synced_info
+
+    collection = []
+    if not os.path.exists(VIDEOS_FILE):
+        synced_info = True
+        return collection
+
+    with open(VIDEOS_FILE + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        with open(VIDEOS_FILE, newline='', encoding='utf-8') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                channel, video_url, date_text, duration_text, title = row
+
+                video_id = get_video_id(video_url)
+                thumbnail_url = get_thumbnail_url(video_url, video_id)
+
+                if duration_text != "NA":
+                    seconds = round(float(duration_text))
+                    duration_text = f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+                collection.append({
+                    "id": video_id,
+                    "channel": channel,
+                    "url": video_url,
+                    "title": title,
+                    "date": date_text if date_text != "NA" else None,
+                    "duration": duration_text,
+                    "thumbnail": thumbnail_url,
+                    "mark": None,
+                })
+
+    collection.sort(key=lambda x: x["date"] if x["date"]
+                    is not None else "0", reverse=True)
+
+    if synced_channels:
+        while threading.active_count() < 12:
+            target = next_to_expand(collection)
+            if target is not None:
+                synced_info = False
+                print("info", target["title"])
+
+                def download_info_thread():
+                    download_info(target["channel"], target["url"])
+                threading.Thread(target=download_info_thread,
+                                 daemon=True).start()
+            else:
+                synced_info = True
+                break
+
+    return collection
+
+
+fetching = set()
+
+
+def next_to_expand(collection):
+    channel_older = dict()
+
+    for i in collection:
+        if i["date"] is not None:
+            channel_older[i["channel"]] = i["date"]
+        else:
+            if i["channel"] not in channel_older and i["url"] not in fetching:
+                fetching.add(i["url"])
+                return i
+
+    channel = max(channel_older, key=channel_older.get)
+
+    for i in collection:
+        if i["channel"] == channel and i["date"] is None and i["url"] not in fetching:
+            fetching.add(i["url"])
+            return i
+    for i in collection:
+        if i["date"] is None and i["url"] not in fetching:
+            fetching.add(i["url"])
+            return i
+    return None
+
+
+def load_image_from_url(url, gtk_image_widget):
+
+    path = get_cached_image_path(url, True)
+    if path is not None:
+        gtk_image_widget.set_from_file(path)
+        return
+
+    def fetch_thread():
+        path = get_cached_image_path(url)
+        if path:
+            GLib.idle_add(gtk_image_widget.set_from_file, path)
+
+    threading.Thread(target=fetch_thread, daemon=True).start()
+
+
+def get_cached_image_path(url, check=False):
+
+    ext = url.split('.')[-1] or "png"
+    filename = hashlib.sha1(url.encode()).hexdigest() + f".{ext}"
+    local_path = os.path.join(CACHE_DIR, filename)
+
+    if not os.path.exists(local_path):
+        if check:
+            return None
+        try:
+            with urllib.request.urlopen(url) as response, open(local_path, 'wb') as out_file:
+                out_file.write(response.read())
+        except Exception as e:
+            print(f"Error downloading {url}: {e}")
+            return None
+
+    return local_path
+
+
+today = date.today()
+
+icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+paintable_video_icon = icon_theme.lookup_icon(
+    # "video-x-generic",
+    "application-x-generic",
+    None, 100, 1, Gtk.TextDirection.NONE, 0
+)
+images_dict = dict()
+
+
+class VideoRow(Gtk.Box):
+    def __init__(self, video_data):
+        super().__init__(orientation=HORIZONTAL, spacing=12)
+        self.video_data = video_data
+
+        self.set_margin_top(0)
+        self.set_margin_bottom(0)
+        self.set_margin_start(12)
+        self.set_margin_end(12)
+
+        thumbnail = Gtk.Image.new_from_paintable(paintable_video_icon)
+        thumbnail.set_pixel_size(100)
+        self.append(thumbnail)
+
+        if video_data["thumbnail"] != "NA":
+            load_image_from_url(video_data["thumbnail"], thumbnail)
+
+        vbox = Gtk.Box(orientation=VERTICAL, spacing=2)
+        vbox.set_valign(Gtk.Align.CENTER)
+
+        channel_label = Gtk.Label(label=video_data["channel"], xalign=0)
+        # channel_label.add_css_class("caption")
+        channel_label.add_css_class("dim-label")
+        vbox.append(channel_label)
+
+        title_label = Gtk.Label(label=video_data["title"], xalign=0)
+        title_label.set_wrap(True)
+        title_label.add_css_class("heading")
+        vbox.append(title_label)
+
+        status = []
+
+        if video_data["date"] is not None:
+            d = datetime.strptime(video_data["date"], "%Y%m%d").date()
+            status.append(f"{d.year}-{d.month}-{d.day}")
+            ago = (today - d)
+            days, years = ago.days, round(ago.days / 365 * 10)/10
+            status.append(f"{f"{years} years" if days >
+                          365 else f"{days} days"} ago")
+        else:
+            status.append("...")
+
+        if video_data["mark"] is not None:
+            status.append("Watched" if video_data["mark"] == 0 else "Ignored")
+
+        subtitle_label = Gtk.Label(label="  •  ".join(status), xalign=0)
+        subtitle_label.add_css_class("caption")
+        # subtitle_label.add_css_class("dim-label")
+        vbox.append(subtitle_label)
+
+        self.append(vbox)
+
+        gesture = Gtk.GestureClick()
+        gesture.connect("pressed", self.clicked)
+        self.add_controller(gesture)
+
+    def clicked(self, gesture, n_press, x, y):
+        url = self.video_data["url"]
+        print(url)
+        run(["sh", "-c", f"echo '{url}' | xclip -sel c -i"])
+        self.hide()
+
+
+class VideoBrowserWindow(Adw.ApplicationWindow):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.set_default_size(600, 800)
+        self.set_title("Video Browser")
+
+        self.main_stack = Gtk.Box(orientation=VERTICAL)
+        self.set_content(self.main_stack)
+
+        header = Adw.HeaderBar()
+        title_widget = Adw.WindowTitle(title="Video Browser")
+        header.set_title_widget(title_widget)
+
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_margin_start(12)
+        self.spinner.set_halign(Gtk.Align.CENTER)
+        self.spinner.set_valign(Gtk.Align.CENTER)
+        self.spinner.set_hexpand(True)
+        self.spinner.set_vexpand(True)
+        self.spinner.start()
+
+        self.spinner_label = Gtk.Label(label="sync")
+        self.spinner_label.add_css_class("caption")
+
+        header_start = Gtk.Box(orientation=HORIZONTAL, spacing=8)
+        header_start.append(self.spinner)
+        header_start.append(self.spinner_label)
+        header.pack_start(header_start)
+
+        self.refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
+        self.refresh_button.connect("clicked", self.on_refresh_clicked)
+
+        self.edit_channels = Gtk.Button(icon_name="view-list-symbolic")
+        self.edit_channels.connect("clicked", self.on_edit_channels)
+
+        header_end = Gtk.Box(orientation=HORIZONTAL, spacing=8)
+        header_end.append(self.refresh_button)
+        header_end.append(self.edit_channels)
+        header.pack_end(header_end)
+
+        self.main_stack.append(header)
+
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_vexpand(True)
+        self.main_stack.append(self.scrolled)
+
+        self.list_box = Gtk.ListBox()
+        self.list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.list_box.add_css_class("boxed-list")
+        self.list_box.set_margin_top(12)
+        self.list_box.set_margin_bottom(12)
+        self.list_box.set_margin_start(12)
+        self.list_box.set_margin_end(12)
+
+        self.scrolled.set_child(self.list_box)
+
+        self.adj = self.scrolled.get_vadjustment()
+        self.adj.connect("value-changed", self.on_scroll_changed)
+
+        self.loading = False
+        self.load_data()
+
+        synced_channels = False
+        synced_info = False
+
+        global win
+        win = self
+        threading.Thread(target=sync_lists, daemon=True).start()
+
+    def on_refresh_clicked(self, button):
+        global synced_channels, synced_info
+        if not synced_channels:
+            return
+        synced_channels = False
+        synced_info = False
+        threading.Thread(target=sync_lists, daemon=True).start()
+
+    def on_edit_channels(self, button):
+        def edit_thread():
+            result = run([
+                "zenity", "--text-info", "--title=Channels", "--editable", "--modal",
+                "--filename", CHANNELS_FILE
+            ], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                with open(CHANNELS_FILE, 'w') as file:
+                    file.write(result.stdout.strip())
+                load_channels()
+                sync_lists()
+        threading.Thread(target=edit_thread, daemon=True).start()
+
+    def load_data(self):
+        # self.refresh_btn.set_sensitive(False)
+        while child := self.list_box.get_first_child():
+            self.list_box.remove(child)
+
+        self.data = None
+        self.limit = 0
+        self.load_more()
+
+    def reload_data(self):
+        self.loading = True
+        scroll_value = self.adj.get_value()
+
+        while child := self.list_box.get_first_child():
+            self.list_box.remove(child)
+
+        self.data = fetch_videos()
+        self.update_ui(self.data[:self.limit])
+
+        win.adj.set_value(scroll_value)
+
+    def load_more(self):
+        self.loading = True
+
+        if self.data is None:
+            self.data = fetch_videos()
+
+        self.update_ui(self.data[self.limit:self.limit+LIMIT_STEP])
+        self.limit += LIMIT_STEP
+
+    def update_ui(self, data):
+        global synced_channels, synced_info
+
+        for item in data:
+            row_widget = VideoRow(item)
+            self.list_box.append(row_widget)
+
+        self.refresh_button.set_sensitive(True)
+        if not synced_channels:
+            self.refresh_button.set_sensitive(False)
+            self.spinner.start()
+            self.spinner_label.set_text("channels")
+        elif not synced_info:
+            self.spinner.start()
+            self.spinner_label.set_text(
+                f"info {len(list(filter(lambda x: x["date"] is None, self.data)))}")
+        else:
+            self.spinner.stop()
+            self.spinner_label.set_text("")
+
+        self.loading = False
+        return False
+
+    def on_scroll_changed(self, adj):
+        if self.loading:
+            return
+
+        value = adj.get_value()
+        upper = adj.get_upper()
+        page_size = adj.get_page_size()
+
+        threshold = 150
+        if value >= (upper - page_size - threshold):
+            self.load_more()
+
+
+class VideoBrowserApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="com.maanoo.VideoBrowser")
+
+    def do_activate(self):
+        global win
+        win = VideoBrowserWindow(application=self)
+        win.present()
+
+
+if __name__ == "__main__":
+    app = VideoBrowserApp()
+    app.run(sys.argv)
