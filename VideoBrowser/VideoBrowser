@@ -11,6 +11,7 @@ import hashlib
 import fcntl
 from datetime import datetime, date
 from subprocess import run, Popen, PIPE
+from multiprocessing import Value
 
 # fmt: off
 gi.require_version('Gtk', '4.0')
@@ -51,6 +52,7 @@ channels = []
 win = None
 synced_channels = False
 synced_info = False
+download_threads = Value('i', 0)
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -118,12 +120,18 @@ def sync_lists():
 
 
 def download_info(channel, video_url):
+    with download_threads.get_lock():
+        download_threads.value += 1
+
     result = run([
         "yt-dlp", "--skip-download",
         "--print", channel + FIELD_DESC,
         "--replace-in-metadata", "title", "[\"]", "'",
         video_url
     ], capture_output=True, text=True)
+
+    with download_threads.get_lock():
+        download_threads.value -= 1
 
     if result.returncode == 0:
         line = result.stdout.strip()
@@ -469,7 +477,7 @@ class VideoBrowserWindow(Adw.ApplicationWindow):
             self.refresh_button.set_sensitive(False)
             self.spinner.start()
             self.spinner_label.set_text("channels")
-        elif not synced_info:
+        elif not synced_info or download_threads.value > 0:
             self.spinner.start()
             self.spinner_label.set_text(
                 f"info {len(list(filter(lambda x: x["date"] is None, self.data)))}")
