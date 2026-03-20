@@ -12,6 +12,7 @@ import fcntl
 from datetime import datetime, date
 from subprocess import run, Popen, PIPE
 from multiprocessing import Value
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # fmt: off
 gi.require_version('Gtk', '4.0')
@@ -49,6 +50,7 @@ def config_read_or(p, default=None):
 
 
 channels = []
+channel_names = dict()
 win = None
 synced_channels = False
 synced_info = False
@@ -57,7 +59,7 @@ download_threads = Value('i', 0)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-def replace_line(file_path, pattern, new_line):
+def replace_line(file_path, pattern, new_line=None, replacer=None):
     with open(file_path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
 
@@ -66,7 +68,10 @@ def replace_line(file_path, pattern, new_line):
         with open(file_path, 'w') as f:
             for line in lines:
                 if pattern in line:
-                    f.write(new_line + '\n')
+                    if new_line is not None:
+                        f.write(new_line + '\n')
+                    else:
+                        f.write(replacer(line))
                 else:
                     f.write(line)
 
@@ -86,10 +91,33 @@ def load_channels():
         line = line.strip()
         if len(line) == 0 or line[0] == "#":
             continue
-        channels.append(line)
+        parts = line.split(" ", 1)
+        channels.append(parts[0])
+        channel_names[parts[0]] = parts[1] if len(parts) > 1 else parts[0]
 
 
 load_channels()
+
+
+def sync_list(channel):
+    # return False
+    print("channel", channel)
+
+    result = Popen([
+        "yt-dlp", "--flat-playlist", "--skip-download", "--force-write-archive",
+        "--download-archive", ARCHIVE_FILE, "--break-on-existing",
+        "--print", channel + FIELD_DESC,
+        "--replace-in-metadata", "title", "[\"]", "'",
+        "https://www.youtube.com/" + channel
+    ], stdout=PIPE, text=True)
+
+    added = False
+    for line in result.stdout:
+        append_line(VIDEOS_FILE, line.strip())
+        added = True
+
+    print("/ channel", channel)
+    return added
 
 
 def sync_lists():
@@ -97,29 +125,19 @@ def sync_lists():
     synced_channels = False
     synced_info = False
 
-    for channel in channels:
-        result = Popen([
-            "yt-dlp", "--flat-playlist", "--skip-download", "--force-write-archive",
-            "--download-archive", ARCHIVE_FILE, "--break-on-existing",
-            "--print", channel + FIELD_DESC,
-            "--replace-in-metadata", "title", "[\"]", "'",
-            "https://www.youtube.com/" + channel
-        ], stdout=PIPE, text=True)
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = [executor.submit(sync_list, i) for i in channels]
 
-        print("channel", channel)
-        added = False
-        for line in result.stdout:
-            append_line(VIDEOS_FILE, line.strip())
-            added = True
-
-        if added:
-            GLib.idle_add(win.reload_data)
+        for future in as_completed(futures):
+            if future.result():
+                GLib.idle_add(win.reload_data)
 
     synced_channels = True
     GLib.idle_add(win.reload_data)
 
 
 def download_info(channel, video_url):
+    # return False
     with download_threads.get_lock():
         download_threads.value += 1
 
@@ -135,8 +153,15 @@ def download_info(channel, video_url):
 
     if result.returncode == 0:
         line = result.stdout.strip()
-        replace_line(VIDEOS_FILE, video_url, line)
-        GLib.idle_add(win.reload_data)
+        replace_line(VIDEOS_FILE, video_url, new_line=line)
+    else:
+        error = result.stderr.strip()
+        if "confirm your age" in error:
+            replace_line(VIDEOS_FILE, video_url, replacer=lambda line: line.replace("NA", "0"))
+        else:
+            print(error)
+
+    GLib.idle_add(win.reload_data)
 
 
 def get_video_id(video_url):
@@ -196,11 +221,13 @@ def fetch_videos():
             target = next_to_expand(collection)
             if target is not None:
                 synced_info = False
-                print("info", target["title"])
 
-                def download_info_thread():
+                def download_info_thread(target):
+                    print("info", target["title"])
                     download_info(target["channel"], target["url"])
-                threading.Thread(target=download_info_thread,
+                    print("/ info", target["title"])
+
+                threading.Thread(target=download_info_thread, args=(target,),
                                  daemon=True).start()
             else:
                 synced_info = True
@@ -301,7 +328,8 @@ class VideoRow(Gtk.Box):
         vbox = Gtk.Box(orientation=VERTICAL, spacing=2)
         vbox.set_valign(Gtk.Align.CENTER)
 
-        channel_label = Gtk.Label(label=video_data["channel"], xalign=0)
+        channel_name = channel_names[video_data["channel"]]
+        channel_label = Gtk.Label(label=channel_name, xalign=0)
         # channel_label.add_css_class("caption")
         channel_label.add_css_class("dim-label")
         vbox.append(channel_label)
@@ -341,7 +369,7 @@ class VideoRow(Gtk.Box):
         url = self.video_data["url"]
         print(url)
         run(["sh", "-c", f"echo '{url}' | xclip -sel c -i"])
-        self.hide()
+        # self.hide()
 
 
 class VideoBrowserWindow(Adw.ApplicationWindow):
