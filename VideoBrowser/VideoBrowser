@@ -35,6 +35,7 @@ os.makedirs(CACHE, exist_ok=True)
 
 CHANNELS_FILE = (CONFIG + "channels.conf")
 VIDEOS_FILE = (CONFIG + "videos_list.csv")
+VIDEOS_PENDING = (CONFIG + "videos_pending.csv")
 ARCHIVE_FILE = (CONFIG + "videos_archive.txt")
 CACHE_DIR = (CACHE + "thumbnails")
 
@@ -57,23 +58,6 @@ synced_info = False
 download_threads = Value('i', 0)
 
 os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def replace_line(file_path, pattern, new_line=None, replacer=None):
-    with open(file_path + ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-
-        with open(file_path, 'r') as f:
-            lines = f.readlines()
-        with open(file_path, 'w') as f:
-            for line in lines:
-                if pattern in line:
-                    if new_line is not None:
-                        f.write(new_line + '\n')
-                    else:
-                        f.write(replacer(line))
-                else:
-                    f.write(line)
 
 
 def append_line(file_path, new_line):
@@ -113,7 +97,7 @@ def sync_list(channel):
 
     added = False
     for line in result.stdout:
-        append_line(VIDEOS_FILE, line.strip())
+        append_line(VIDEOS_PENDING, line.strip())
         added = True
 
     print("/ channel", channel)
@@ -125,7 +109,7 @@ def sync_lists():
     synced_channels = False
     synced_info = False
 
-    with ThreadPoolExecutor(max_workers=12) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = [executor.submit(sync_list, i) for i in channels]
 
         for future in as_completed(futures):
@@ -136,7 +120,7 @@ def sync_lists():
     GLib.idle_add(win.reload_data)
 
 
-def download_info(channel, video_url):
+def download_info(channel, video_url, title):
     # return False
     with download_threads.get_lock():
         download_threads.value += 1
@@ -153,11 +137,12 @@ def download_info(channel, video_url):
 
     if result.returncode == 0:
         line = result.stdout.strip()
-        replace_line(VIDEOS_FILE, video_url, new_line=line)
+        append_line(VIDEOS_FILE, line)
     else:
         error = result.stderr.strip()
         if "confirm your age" in error:
-            replace_line(VIDEOS_FILE, video_url, replacer=lambda line: line.replace("NA", "0"))
+            line = ",".join([channel, video_url, "0", "0", f"\"{title}\""])
+            append_line(VIDEOS_FILE, line)
         else:
             print(error)
 
@@ -178,19 +163,14 @@ def get_thumbnail_url(video_url, video_id):
         return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
     return "NA"
 
+def fetch_videos_file(file_path, collection):
+    if not os.path.exists(file_path):
+        return
 
-def fetch_videos():
-    global synced_info
-
-    collection = []
-    if not os.path.exists(VIDEOS_FILE):
-        synced_info = True
-        return collection
-
-    with open(VIDEOS_FILE + ".lock", "w") as lock:
+    with open(file_path + ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
 
-        with open(VIDEOS_FILE, newline='', encoding='utf-8') as file:
+        with open(file_path, newline='', encoding='utf-8') as file:
             reader = csv.reader(file)
             for row in reader:
                 channel, video_url, date_text, duration_text, title = row
@@ -201,6 +181,9 @@ def fetch_videos():
                 if duration_text != "NA":
                     seconds = round(float(duration_text))
                     duration_text = f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+                if any(i["id"] == video_id for i in collection):
+                    continue
 
                 collection.append({
                     "id": video_id,
@@ -213,6 +196,17 @@ def fetch_videos():
                     "mark": None,
                 })
 
+def fetch_videos():
+    global synced_info
+
+    collection = []
+    if not os.path.exists(VIDEOS_FILE) and not os.path.exists(VIDEOS_PENDING):
+        synced_info = True
+        return collection
+
+    fetch_videos_file(VIDEOS_FILE, collection)
+    fetch_videos_file(VIDEOS_PENDING, collection)
+
     collection.sort(key=lambda x: x["date"] if x["date"]
                     is not None else "0", reverse=True)
 
@@ -224,13 +218,15 @@ def fetch_videos():
 
                 def download_info_thread(target):
                     print("info", target["title"])
-                    download_info(target["channel"], target["url"])
+                    download_info(target["channel"], target["url"], target["title"])
                     print("/ info", target["title"])
 
                 threading.Thread(target=download_info_thread, args=(target,),
                                  daemon=True).start()
             else:
                 synced_info = True
+                if os.path.exists(VIDEOS_PENDING):
+                    os.remove(VIDEOS_PENDING)
                 break
 
     return collection
