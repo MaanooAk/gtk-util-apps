@@ -163,7 +163,7 @@ def get_thumbnail_url(video_url, video_id):
         return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
     return "NA"
 
-def fetch_videos_file(file_path, collection):
+def fetch_videos_file(file_path, collection, check=False):
     if not os.path.exists(file_path):
         return
 
@@ -182,7 +182,7 @@ def fetch_videos_file(file_path, collection):
                     seconds = round(float(duration_text))
                     duration_text = f"{seconds // 60:02d}:{seconds % 60:02d}"
 
-                if any(i["id"] == video_id for i in collection):
+                if check and any(i["id"] == video_id for i in collection):
                     continue
 
                 collection.append({
@@ -205,7 +205,7 @@ def fetch_videos():
         return collection
 
     fetch_videos_file(VIDEOS_FILE, collection)
-    fetch_videos_file(VIDEOS_PENDING, collection)
+    fetch_videos_file(VIDEOS_PENDING, collection, check=True)
 
     collection.sort(key=lambda x: x["date"] if x["date"]
                     is not None else "0", reverse=True)
