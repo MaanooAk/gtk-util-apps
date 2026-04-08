@@ -175,6 +175,9 @@ def fetch_videos_file(file_path, collection, check=False):
             for row in reader:
                 channel, video_url, date_text, duration_text, title = row
 
+                if not channel in channel_names:
+                    continue
+
                 video_id = get_video_id(video_url)
                 thumbnail_url = get_thumbnail_url(video_url, video_id)
 
@@ -448,7 +451,8 @@ class VideoBrowserWindow(Adw.ApplicationWindow):
     def on_edit_channels(self, button):
         def edit_thread():
             result = run([
-                "zenity", "--text-info", "--title=Channels", "--editable", "--modal",
+                "zenity", "--text-info", "--title=Channels", "--editable", 
+                "--modal", "--width=500", "--height=600",
                 "--filename", CHANNELS_FILE
             ], capture_output=True, text=True)
 
