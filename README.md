@@ -6,6 +6,7 @@ Collection of small gtk utils apps that are not worth their own repo
 - [SystemBars](./SystemBars/)
 - [last-email](./last-email/)
 - [VideoBrowser](./VideoBrowser/)
+- [MixedCalc](./MixedCalc/)
 - [Black](./Black/)
 
 
@@ -26,6 +27,10 @@ Collection of small gtk utils apps that are not worth their own repo
 - [VideoBrowser](./VideoBrowser/)
 
 ![](.screens/VideoBrowser.png)
+
+- [MixedCalc](./MixedCalc/)
+
+![](.screens/MixedCalc.png)
 
 - [Black](./Black/)
 

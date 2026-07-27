@@ -1,0 +1,275 @@
+#!/bin/env python3
+
+import sys
+import os
+import gi
+
+# fmt: off
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+
+from gi.repository import Gtk, Adw, Gio, GLib, Gdk, GObject
+# fmt: on
+
+HORIZONTAL = Gtk.Orientation.HORIZONTAL
+VERTICAL = Gtk.Orientation.VERTICAL
+
+CONFIG = os.path.expanduser("~/.config/MixedCalc/")
+os.makedirs(CONFIG, exist_ok=True)
+
+HISTORY_FILE = (CONFIG + "history")
+
+
+def config_read_or(p, default=None):
+    if not os.path.exists(p):
+        if default is not None:
+            return default
+        raise FileNotFoundError(p)
+    return open(p).read().strip()
+
+
+def append_line(file_path, new_line):
+    with open(file_path, 'a') as f:
+        f.write(new_line + '\n')
+
+
+class MixedCalcWindow(Adw.ApplicationWindow):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.set_default_size(900, 500)
+        self.set_title("Mixed Calc")
+
+        self.main_stack = Gtk.Box(orientation=VERTICAL)
+        self.set_content(self.main_stack)
+
+        header = Adw.HeaderBar()
+        title_widget = Adw.WindowTitle(title="Mixed Calc")
+        header.set_title_widget(title_widget)
+
+        self.menu_button = Gtk.Button(icon_name="view-list-symbolic")
+        self.menu_button.connect("clicked", self.on_menu_button)
+
+        header_end = Gtk.Box(orientation=HORIZONTAL, spacing=8)
+        header_end.append(self.menu_button)
+        header.pack_end(header_end)
+
+        self.main_stack.append(header)
+
+        self.input_entry = Gtk.TextView()
+        self.input_entry.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.input_entry.set_top_margin(12)
+        self.input_entry.set_bottom_margin(12)
+        self.input_entry.set_left_margin(12)
+        self.input_entry.set_right_margin(12)
+        self.input_entry.add_css_class("flat")
+
+        input_buffer = self.input_entry.get_buffer()
+        input_buffer.connect("changed", self.on_input_changed)
+        controller = Gtk.EventControllerKey()
+        controller.connect("key-pressed", self.on_key_pressed)
+        self.input_entry.add_controller(controller)
+
+        input_scroll = Gtk.ScrolledWindow()
+        input_scroll.set_hexpand(True)
+        input_scroll.set_vexpand(True)
+        input_scroll.set_child(self.input_entry)
+        self.main_stack.append(input_scroll)
+
+        GLib.idle_add(lambda: (self.input_entry.grab_focus(), False)[1])
+
+        self.output_entry = Gtk.TextView()
+        self.output_entry.set_editable(False)
+        self.output_entry.set_cursor_visible(False)
+        self.output_entry.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.output_entry.set_top_margin(12)
+        self.output_entry.set_bottom_margin(12)
+        self.output_entry.set_left_margin(12)
+        self.output_entry.set_right_margin(12)
+        self.output_entry.add_css_class("flat")
+        self.output_entry.add_css_class("output")
+
+        output_scroll = Gtk.ScrolledWindow()
+        output_scroll.set_hexpand(True)
+        output_scroll.set_vexpand(True)
+        output_scroll.set_child(self.output_entry)
+        self.main_stack.append(output_scroll)
+
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+        textview {
+            font-size: 2em;
+            font-family: monospace;
+            background: transparent;
+        }
+        textview.output {
+            font-size: 1.9em;
+        }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+    def get_input_text(self):
+        buffer = self.input_entry.get_buffer()
+        start, end = buffer.get_bounds()
+        return buffer.get_text(start, end, True)
+
+    def on_input_changed(self, buffer):
+        result = calc(self.get_input_text())
+        self.output_entry.get_buffer().set_text("=\n" + str(result))
+
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        if keyval == Gdk.KEY_Return:
+            result = calc(self.get_input_text())
+            self.input_entry.get_buffer().set_text(str(result))
+            result = calc(self.get_input_text())
+            self.output_entry.get_buffer().set_text("=\n" + str(result))
+            return True
+        return False
+
+    def on_menu_button(self, button):
+        menu = Gio.Menu()
+        menu.append("Operations", "app.operations")
+
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_parent(button)
+        popover.popup()
+
+    def show_operations_dialog(self):
+        dialog = Adw.Dialog()
+        dialog.set_title("Operations")
+        dialog.set_content_width(500)
+        dialog.set_content_height(400)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+
+        scroll = Gtk.ScrolledWindow()
+        listbox = Gtk.ListBox()
+
+        for name, (desc, argc, _) in operations.items():
+            row = Gtk.Box(orientation=HORIZONTAL, spacing=12)
+            row.set_margin_top(6)
+            row.set_margin_bottom(6)
+            row.set_margin_start(12)
+            row.set_margin_end(12)
+
+            row.append(Gtk.Label(label=name, xalign=0))
+            row.append(Gtk.Label(label="[" + str(argc) + "]", xalign=0))
+            row.append(Gtk.Label(label=desc, xalign=0))
+
+            listbox.append(row)
+
+        scroll.set_child(listbox)
+        toolbar.set_content(scroll)
+
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
+
+class MixedCalcApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="com.maanoo.MixedCalc")
+
+        action = Gio.SimpleAction.new("operations", None)
+        action.connect("activate", self.on_operation)
+        self.add_action(action)
+
+    def on_operation(self, action, param):
+        win = self.props.active_window
+        if win is not None:
+            win.show_operations_dialog()
+
+    def do_activate(self):
+        win = MixedCalcWindow(application=self)
+        win.present()
+
+# fmt: off
+import re
+import math
+import random
+import humanize
+
+def number(text):
+    try: return int(text.replace(",", ""))
+    except: return float(text.replace(",", ""))
+
+operations = {
+    "pi": ("Push π", 0, lambda s: s.append(math.pi)),
+    "tau": ("Push τ", 0, lambda s: s.append(math.tau)),
+    "e": ("Push Euler's number", 0, lambda s: s.append(math.e)),
+    "inf": ("Push Infinity", 0, lambda s: s.append(math.inf)),
+    "random": ("Push random number in [0,1)", 0, lambda s: s.append(random.random())),
+
+    "int": ("Convert top to int", 1, lambda s: s.append(int(s.pop()))),
+    "float": ("Convert top to float", 1, lambda s: s.append(float(s.pop()))),
+    "round": ("Round top", 1, lambda s: s.append(math.floor(s.pop() + 0.5))),
+    "ceil": ("Ceiling top", 1, lambda s: s.append(math.ceil(s.pop()))),
+    "floor": ("Floor top", 1, lambda s: s.append(math.floor(s.pop()))),
+    "fac": ("Factorial top", 1, lambda s: s.append(math.factorial(s.pop()))),
+
+    "u": ("Format units top", 1, lambda s: s.append(humanize.intcomma(s.pop()))),
+    "b": ("Format bytes top", 1, lambda s: s.append(humanize.naturalsize(s.pop(), binary=True))),
+    "s": ("Format seconds top", 1, lambda s: s.append(humanize.precisedelta(s.pop()))),
+    "m": ("Format minutes top", 1, lambda s: s.append(humanize.precisedelta(s.pop() * 60))),
+    "h": ("Format hours top", 1, lambda s: s.append(humanize.precisedelta(s.pop() * 60 * 60))),
+    "f": ("Format scientific top", 1, lambda s: s.append(humanize.scientific(s.pop()))),
+}
+
+def calc(text):
+    text = text.strip()
+    if len(text) == 0: return 0
+
+    tokens = re.findall(r"([-+*/\\^]?[0-9.,_]+|[*/\\]{1,2}|[-+|^]|[=]?[a-z]+)", text)
+
+    vars = {}
+    stack = []
+    for i in tokens:
+        if i in "+-|**//\\\\^":
+            if len(stack) >= 2:
+                a, b = stack.pop(), stack.pop()
+                if i == "+": stack.append(b + a)
+                elif i == "-": stack.append(b - a)
+                elif i == "|": stack.append(a - b)
+                elif i == "*": stack.append(b * a)
+                elif i == "/": stack.append(b / a)
+                elif i == "\\": stack.append(a / b)
+                elif i == "^": stack.append(b ** a)
+                elif i == "**": stack.append(b ** a)
+                elif i == "//": stack.append(b // a)
+                elif i == "\\\\": stack.append(a // b)
+        elif i[0] in "+-*/\\^" and len(i) > 1:
+            a, b = number(i[1:]), stack.pop()
+            if i[0] == "+": stack.append(b + a)
+            elif i[0] == "-": stack.append(b - a)
+            elif i[0] == "|": stack.append(a - b)
+            elif i[0] == "*": stack.append(b * a)
+            elif i[0] == "/": stack.append(b / a)
+            elif i[0] == "\\": stack.append(a / b)
+            elif i[0] == "^": stack.append(b ** a)
+        elif i[0] == "=":
+            name = i[1:]
+            vars[name] = stack.pop()
+        elif i[0].isalpha():
+            if i in vars:
+                stack.append(vars[i])
+            elif i in operations:
+                desc, argc, func = operations[i]
+                if len(stack) >= argc:
+                    func(stack)
+            else:
+                pass
+        else:
+            stack.append(number(i))
+    if len(stack) == 0:
+        return "0"
+    return " ".join(map(str, stack))
+
+# fmt: on
+
+if __name__ == "__main__":
+    app = MixedCalcApp()
+    app.run(sys.argv)
