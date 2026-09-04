@@ -211,12 +211,19 @@ operations = {
     "floor": ("Floor top", 1, lambda s: s.append(math.floor(s.pop()))),
     "fac": ("Factorial top", 1, lambda s: s.append(math.factorial(s.pop()))),
 
+    "sum": ("Sum stack", 1, lambda s: s.__setitem__(slice(None), [sum(s)])),
+    "avg": ("Average stack", 1, lambda s: s.__setitem__(slice(None), [sum(s) / len(s)])),
+    "min": ("Min of stack", 1, lambda s: s.__setitem__(slice(None), [min(s)])),
+    "max": ("Max of stack", 1, lambda s: s.__setitem__(slice(None), [max(s)])),
+    "prod": ("Product stack", 1, lambda s: s.__setitem__(slice(None), [math.prod(s)])),
+
     "u": ("Format units top", 1, lambda s: s.append(humanize.intcomma(s.pop()))),
     "b": ("Format bytes top", 1, lambda s: s.append(humanize.naturalsize(s.pop(), binary=True))),
     "s": ("Format seconds top", 1, lambda s: s.append(humanize.precisedelta(s.pop()))),
     "m": ("Format minutes top", 1, lambda s: s.append(humanize.precisedelta(s.pop() * 60))),
     "h": ("Format hours top", 1, lambda s: s.append(humanize.precisedelta(s.pop() * 60 * 60))),
     "f": ("Format scientific top", 1, lambda s: s.append(humanize.scientific(s.pop()))),
+
 }
 
 def calc(text):
